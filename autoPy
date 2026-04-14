@@ -20,7 +20,7 @@ from pathlib import Path
 # CONFIGURACIÓN DE LOGS
 # =========================
 def setup_logger():
-    log_dir = Path("logs")
+    log_dir = Path("M:\Management\IT\Share\INVENTORY SNAPSHOT\logs")
     log_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -60,7 +60,7 @@ URL      = "https://gmes30-mcm.hlmando.com/app/view.jsp?w2xPath=/home/main.xml"
 USUARIO  = os.getenv("GMES_USER")
 PASSWORD = os.getenv("GMES_PASS")
 
-BASE_DOWNLOAD_DIR = r"C:\Users\angel.morquecho\Documents\inventaryReports"
+BASE_DOWNLOAD_DIR = r"M:\Management\IT\Share\INVENTORY SNAPSHOT"
 
 def get_download_path():
     """Devuelve BASE_DIR/YYYY-MM-DD y crea la carpeta si no existe."""
@@ -68,6 +68,13 @@ def get_download_path():
     path = Path(BASE_DOWNLOAD_DIR) / today
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+def get_logs_paths():
+    today = datetime.now().strftime("%y-%m-%d-logs")
+    folder_name = f"logs_{today}"
+    pathlogs = Path(BASE_DOWNLOAD_DIR) / folder_name
+    pathlogs.mkdir(parents=True, exist_ok=True)
+    return pathlogs
 
 def main():
     log = setup_logger()
