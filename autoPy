@@ -1,0 +1,208 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from dotenv import load_dotenv
+from selenium.webdriver.common.keys import Keys
+import os
+import time
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+# =========================
+# CONFIGURACIÓN DE LOGS
+# =========================
+def setup_logger():
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"gmes_{timestamp}.log"
+
+    logger = logging.getLogger("GMES")
+    logger.setLevel(logging.DEBUG)
+
+    # Formato
+    fmt = logging.Formatter(
+        "[%(asctime)s] [%(levelname)-8s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Handler → archivo
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+
+    # Handler → consola
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    logger.info(f"Log iniciado: {log_file}")
+    return logger
+
+
+# =========================
+# CONFIGURACIÓN
+# =========================
+load_dotenv()
+URL      = "https://gmes30-mcm.hlmando.com/app/view.jsp?w2xPath=/home/main.xml"
+USUARIO  = os.getenv("GMES_USER")
+PASSWORD = os.getenv("GMES_PASS")
+
+BASE_DOWNLOAD_DIR = r"C:\Users\angel.morquecho\Documents\inventaryReports"
+
+def get_download_path():
+    """Devuelve BASE_DIR/YYYY-MM-DD y crea la carpeta si no existe."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    path = Path(BASE_DOWNLOAD_DIR) / today
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+def main():
+    log = setup_logger()
+    driver = None
+
+    try:
+        # ── Validar credenciales ──────────────────────────────────────────────
+        if not USUARIO or not PASSWORD:
+            log.error("Variables GMES_USER / GMES_PASS no encontradas en .env")
+            sys.exit(1)
+        log.info(f"Usuario cargado: {USUARIO}")
+
+        # ── Preparar carpeta de descarga ──────────────────────────────────────
+        download_path = get_download_path()
+        log.info(f"Carpeta de descarga: {download_path}")
+
+        # ── Opciones de Chrome ────────────────────────────────────────────────
+        log.info("Configurando Chrome...")
+        chrome_options = Options()
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_experimental_option("prefs", {
+            "download.default_directory": str(download_path),
+            "download.prompt_for_download": False,
+            "directory_upgrade": True,
+        })
+
+        # ── Inicializar driver ────────────────────────────────────────────────
+        log.info("Iniciando ChromeDriver...")
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+        wait = WebDriverWait(driver, 30)
+        log.info("ChromeDriver iniciado correctamente")
+
+        # ── 1. Abrir URL ──────────────────────────────────────────────────────
+        log.info(f"Navegando a: {URL}")
+        driver.get(URL)
+
+        # ── Manejar alerta ────────────────────────────────────────────────────
+        try:
+            WebDriverWait(driver, 5).until(EC.alert_is_present())
+            alert = driver.switch_to.alert
+            log.info(f"Alerta detectada: {alert.text}")
+            alert.accept()
+            log.info("Alerta aceptada (OK)")
+        except TimeoutException:
+            log.debug("Sin alerta al abrir la página")
+
+        # ── 2. Login ──────────────────────────────────────────────────────────
+        log.info("Realizando login...")
+        wait.until(EC.presence_of_element_located((By.ID, "txtUSER_ID"))).send_keys(USUARIO)
+        driver.find_element(By.ID, "txtPWD").send_keys(PASSWORD)
+        driver.find_element(By.ID, "btnLogin").click()
+        log.info("Credenciales enviadas")
+
+        # ── 3. Esperar redirección ────────────────────────────────────────────
+        log.info("Esperando redirección post-login...")
+        wait.until(EC.presence_of_element_located((By.ID, "btn_nav02")))
+        log.info("Login exitoso — página principal cargada")
+
+        # ── 4. Navegación menú ────────────────────────────────────────────────
+        log.info("Navegando por el menú...")
+
+        btn_nav = wait.until(EC.presence_of_element_located((By.ID, "btn_nav02")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", btn_nav)
+        wait.until(EC.element_to_be_clickable((By.ID, "btn_nav02")))
+        btn_nav.click()
+        log.debug("btn_nav02 clickeado")
+
+        elem2 = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-11")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", elem2)
+        elem2.click()
+        log.debug("ui-id-11 clickeado")
+
+        elem3 = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-19")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", elem3)
+        elem3.click()
+        log.debug("ui-id-19 clickeado")
+        log.info("Menú navegado correctamente")
+
+        # ── 5. Opciones de consulta ───────────────────────────────────────────
+        log.info("Cambiando al frame de consulta...")
+        driver.switch_to.frame("mainTabControl_contents_1406_body")
+        wait_frame = WebDriverWait(driver, 10)
+
+        log.info("Seleccionando opción ERP Qty...")
+        erpqty = wait_frame.until(EC.element_to_be_clickable((By.ID, "chkRFC_input_0")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", erpqty)
+        erpqty.click()
+        log.info("ERP Qty seleccionado")
+
+        # ── 6. Ejecutar búsqueda ──────────────────────────────────────────────
+        log.info("Ejecutando búsqueda principal...")
+        wait_frame.until(EC.element_to_be_clickable((By.ID, "btnMainSearch"))).click()
+        log.info("Búsqueda iniciada")
+
+        # ── 7. Esperar resultados ─────────────────────────────────────────────
+        log.info("Esperando que cargue el loading bar...")
+        WebDriverWait(driver, 20).until(
+            EC.invisibility_of_element_located((By.ID, "loadingBar"))
+        )
+        log.info("Resultados cargados")
+
+        # ── 8. Descargar Excel ────────────────────────────────────────────────
+        log.info("Iniciando descarga de Excel...")
+        download_btn = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "btnGrid1ExcelDownload"))
+        )
+        download_btn.click()
+        log.debug("Botón de descarga clickeado")
+
+        time.sleep(5)
+        driver.switch_to.active_element.send_keys(Keys.ENTER)
+        log.info("Confirmación de descarga enviada (ENTER)")
+
+        time.sleep(8)
+        log.info("✅ Descarga completada — automatización finalizada correctamente")
+
+    except TimeoutException as e:
+        log.error(f"Timeout esperando un elemento: {e}")
+        sys.exit(2)
+    except WebDriverException as e:
+        log.error(f"Error de WebDriver: {e}")
+        sys.exit(3)
+    except Exception as e:
+        log.exception(f"Error inesperado: {e}")
+        sys.exit(4)
+    finally:
+        if driver:
+            log.info("Cerrando navegador...")
+            driver.quit()
+            log.info("Navegador cerrado")
+
+
+if __name__ == "__main__":
+    main()
