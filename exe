@@ -1,0 +1,69 @@
+@echo off
+title GMES Automation
+color 0A
+
+echo ================================================
+echo   GMES - Descarga Automatica de Excel
+echo   %DATE% %TIME%
+echo ================================================
+echo.
+
+:: Verificar que existe el .env
+if not exist ".env" (
+    echo [ERROR] No se encontro el archivo .env
+    echo         Crea un archivo .env con GMES_USER y GMES_PASS
+    pause
+    exit /b 1
+)
+
+:: Verificar que existe el script Python
+if not exist "gmes_automation.py" (
+    echo [ERROR] No se encontro gmes_automation.py
+    pause
+    exit /b 1
+)
+
+:: Crear carpeta de logs si no existe
+if not exist "M:\Management\IT\Share\INVENTORY SNAPSHOT\logs" (
+    mkdir "M:\Management\IT\Share\INVENTORY SNAPSHOT\logs"
+)
+
+
+:: ── Instalar dependencias ──────────────────────────────────────────────────
+echo [INFO] Verificando e instalando dependencias...
+ python -m pip install selenium webdriver-manager python-dotenv --quiet --disable-pip-version-check
+
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Fallo la instalacion de dependencias.
+    echo         Asegurate de tener Python y pip instalados correctamente.
+    pause
+    exit /b 1
+)
+echo [INFO] Dependencias OK
+echo.
+
+:: ── Ejecutar el script ─────────────────────────────────────────────────────
+echo [INFO] Iniciando automatizacion...
+echo.
+
+python gmes_automation.py
+
+:: Capturar codigo de salida
+set EXIT_CODE=%ERRORLEVEL%
+
+echo.
+if %EXIT_CODE% == 0 (
+    echo ================================================
+    echo   COMPLETADO EXITOSAMENTE
+    echo ================================================
+) else (
+    echo ================================================
+    echo   FINALIZO CON ERROR - Codigo: %EXIT_CODE%
+    echo   Revisa la carpeta logs\ para mas detalles
+    echo ================================================
+)
+
+echo.
+echo Presiona cualquier tecla para cerrar...
+pause >nul
+exit /b %EXIT_CODE%
