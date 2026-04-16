@@ -1,0 +1,30 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from dotenv import load_dotenv
+from selenium.webdriver.common.keys import Keys
+import os
+import time
+import pandas as pd
+
+import os
+import pandas as pd
+
+excelFile = r"C:\Users\elchi\Downloads\pokemons.xlsx"
+
+df = pd.read_excel(excelFile, header=None)
+
+df = df.iloc[2:-1]
+#df = df.drop([0, 1, df.index[-1]])
+
+carpeta = os.path.dirname(excelFile)
+nuevo_path = os.path.join(carpeta, "archivo_nuevo.xlsx")
+
+df.to_excel(nuevo_path, index=False, header=False)
+
+print("Guardado en:", nuevo_path)
