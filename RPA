@@ -1,0 +1,400 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from dotenv import load_dotenv
+from selenium.webdriver.common.keys import Keys
+import os
+import time
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+import pandas as pd
+from openpyxl import load_workbook
+
+# =========================
+# LOGS Config
+# =========================
+def setup_logger():
+    log_dir = get_logs_paths()
+    log_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"WIPandRMDefect_{timestamp}.log"
+
+    logger = logging.getLogger("GMES")
+    logger.setLevel(logging.DEBUG)
+
+    # Formato
+    fmt = logging.Formatter(
+        "[%(asctime)s] [%(levelname)-8s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    
+     # Handler → archivo
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+
+    # Handler → consola
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    logger.info(f"Log started: {log_file}")
+    return logger
+
+
+# =========================
+# CONFIGURACIÓN
+# =========================
+load_dotenv()
+URL      = os.getenv("URL_GMES")
+USUARIO  = os.getenv("GMES_USER")
+PASSWORD = os.getenv("GMES_PASS")
+
+BASE_DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR")
+BASE_LOG_DIR = os.getenv("DOWNLOAD_LOG_DIR")
+
+
+def get_download_path():
+    """Devuelve BASE_DIR/YYYY-MM-DD y crea la carpeta si no existe."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    path = Path(BASE_DOWNLOAD_DIR) / today
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+def get_logs_paths():
+    today = datetime.now().strftime("%y-%m-%d-logs")
+    folder_name = f"logs_{today}"
+    pathlogs = Path(BASE_LOG_DIR) / folder_name
+    pathlogs.mkdir(parents=True, exist_ok=True)
+    return pathlogs
+
+def get_latest_file(directory, pattern="*"):
+    """Busca el archivo más reciente en una carpeta con un patrón específico.
+    
+    Args:
+        directory: Ruta de la carpeta donde buscar
+        pattern: Patrón de nombre de archivo (ej: "Item Qty_*")
+    
+    Returns:
+        Path del archivo más reciente o None si no encuentra
+    """
+    directory = Path(directory)
+    files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+def calculate_yesterday_date():
+    yesterday = datetime.now() - pd.Timedelta(days=1)
+    return yesterday.strftime("%Y%m%d")
+
+
+def main():
+    log = setup_logger()
+    driver = None
+
+    try:
+        # ── Validar credenciales ──────────────────────────────────────────────
+        if not USUARIO or not PASSWORD:
+            log.error("Variables GMES_USER / GMES_PASS not founded in file .env")
+            sys.exit(1)
+        log.info(f"User loaded: {USUARIO}")
+
+        if not URL:
+            log.error("Variable URL_GMES not founded in file .env")
+            sys.exit(1)
+
+        # ── Preparar carpeta de descarga ──────────────────────────────────────
+        download_path = get_download_path()
+        log.info(f"Download folder: {download_path}")
+
+        # ── Chrome Options────────────────────────────────────────────────
+        log.info("Configuring Chrome...")
+        chrome_options = Options()
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--disable-hang-monitor")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_experimental_option("prefs", {
+            "download.default_directory": str(download_path),
+            "download.prompt_for_download": False,
+            "directory_upgrade": True,
+        })
+
+        # ── Inicializar driver ────────────────────────────────────────────────
+        log.info("Starting ChromeDriver...")
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+        driver.set_page_load_timeout(600)
+        driver.set_script_timeout(600)
+
+        wait = WebDriverWait(driver, 10)
+        log.info("ChromeDriver started succesfully")
+
+        # ── 1. Navigate to URL ──────────────────────────────────────────────────────
+        log.info(f"Navigatin to: {URL}")
+        driver.get(URL)
+
+        # ── Handle Arlet ────────────────────────────────────────────────────
+        try:
+            WebDriverWait(driver, 5).until(EC.alert_is_present())
+            alert = driver.switch_to.alert
+            log.info(f"Alert detected: {alert.text}")
+            alert.accept()
+            log.info("Alert was acepted (OK)")
+        except TimeoutException:
+            log.debug("No alert")
+
+        # ── 2. Login ──────────────────────────────────────────────────────────
+        log.info("login...")
+        wait.until(EC.presence_of_element_located((By.ID, "txtUSER_ID"))).send_keys(USUARIO)
+        driver.find_element(By.ID, "txtPWD").send_keys(PASSWORD)
+        driver.find_element(By.ID, "cboLocale_button").click()
+        wait.until(EC.element_to_be_clickable((By.ID, "cboLocale_itemTable_1"))).click()
+        time.sleep(3)
+        driver.find_element(By.ID, "btnLogin").click()
+        log.info("Credential sent")
+
+        # ── 3. Esperar redirección ────────────────────────────────────────────
+        log.info("Waiting for post-login redirection...")
+        wait.until(EC.presence_of_element_located((By.ID, "btn_nav04")))
+        log.info("Login succesful - main page loaded")
+
+        # ── 4. Navigate through menú ────────────────────────────────────────────────
+        log.info("Navigating through menu......")
+
+        btn_nav = wait.until(EC.presence_of_element_located((By.ID, "btn_nav04")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", btn_nav)
+        wait.until(EC.element_to_be_clickable((By.ID, "btn_nav04")))
+        btn_nav.click()
+        log.debug("btn_nav04 clicked")
+
+        elm1 = wait.until(EC.presence_of_element_located((By.ID, "ui-id-9")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", elm1)
+        wait.until(EC.element_to_be_clickable((By.ID, "ui-id-9")))
+        elm1.click()
+        log.debug("Productivity Analysis clicked")
+        time.sleep(2)
+
+        elm2 = wait.until(EC.presence_of_element_located((By.ID, "ui-id-38")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", elm2)
+        wait.until(EC.element_to_be_clickable((By.ID, "ui-id-38")))
+        elm2.click()
+        log.debug("Production Defect Analysis clicked")
+        time.sleep(3)
+
+        elm3 = wait.until(EC.presence_of_element_located((By.ID, "ui-id-60")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", elm3)
+        wait.until(EC.element_to_be_clickable((By.ID, "ui-id-60")))
+        elm3.click()
+        log.debug("In-line Scrap Status clicked")
+
+        # ── 5. Opciones de consulta ───────────────────────────────────────────
+        log.info("Switch iframe...")
+        driver.switch_to.frame("mainTabControl_contents_56_body")
+        wait_frame = WebDriverWait(driver, 10)
+
+        input_date = wait.until(EC.presence_of_element_located((By.ID, "txtSearchPeriodEndDate_input")))
+        input_date.clear()
+        yesterday_date = calculate_yesterday_date()
+        input_date.send_keys(yesterday_date)
+        input_date.send_keys(Keys.RETURN)
+        log.info(f"Date set to: {yesterday_date}")
+
+         # ── 6. Ejecutar búsqueda ──────────────────────────────────────────────
+        log.info("Excecuting main search...")
+        wait.until(EC.element_to_be_clickable((By.ID, "btnMainSearch"))).click()
+        log.info("Búsqueda iniciada")
+
+
+        # ── 7. Esperar resultados ─────────────────────────────────────────────
+        log.info("Waiting for loading bar...")
+        WebDriverWait(driver, 20).until(
+            EC.invisibility_of_element_located((By.ID, "lbMsg"))
+        )
+        log.info("Results loaded")
+
+        # ── 8. Descargar Excel F/G Defect ────────────────────────────────────────────────
+        log.info("Starting Excel Download...")
+        download_btn1 = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "btnGrid1DownloadExcel1"))
+        )
+        download_btn1.click()
+        log.debug("Excel download button clicked")
+        time.sleep(5)
+        driver.switch_to.active_element.send_keys(Keys.ENTER)
+        log.info("Download confirmation sent (ENTER)")
+        time.sleep(10)
+        log.info("Excel F/G DefectDownloaded")
+
+        # ── 8. Descargar Excel R/M Defect ────────────────────────────────────────────────
+        log.info("Starting Excel Download...")
+        download_btn1 = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "btnGrid1DownloadExcel2"))
+        )
+        download_btn1.click()
+        log.debug("Excel download button clicked")
+        time.sleep(5)
+        driver.switch_to.active_element.send_keys(Keys.ENTER)
+        log.info("Download confirmation sent (ENTER)")
+        time.sleep(10)
+        log.info("Excel R/M DefectDownloaded")
+
+    except TimeoutException as e:
+        log.error(f"Timeout waiting for element: {e}")
+        sys.exit(2)
+    except WebDriverException as e:
+        log.error(f"WebDriver error: {e}")
+        sys.exit(3)
+    except Exception as e:
+        log.exception(f"Unexpected error: {e}")
+        sys.exit(4)
+    finally:
+        if driver:
+            log.info("Closing browser...")
+            driver.quit()
+            log.info("Browser Closed")
+    log.info("✅ Continue with excel processing...")
+
+
+
+    time.sleep(5)  # Hold on a little bit for saved the file
+    log.info("Looking for latest F/G Defects Excel file...")
+    latest_excel = get_latest_file(download_path, "F_G Defect*.xlsx")
+    if latest_excel:
+        log.info(f"Opening latest file: {latest_excel.name}")
+        wb1 = load_workbook(latest_excel)
+        ws = wb1.active
+        
+        # ── Desproteger workbook si está protegido ──────────────────────
+        if wb1.read_only:
+            log.info("Workbook structure is locked. Unlocking...")
+            wb1.security.read_only = False
+            log.info("Workbook unlocked successfully")
+        
+    else:
+        log.error("No file found")
+        sys.exit(1)
+
+    log.info("Cleaning up Excel file...")
+    ws.delete_rows(1, 3)   # Borra fila 1 y 3 de una vez
+    time.sleep(1)          # Espera un segundo para asegurarse de que se procese la eliminación
+    ws.delete_rows(ws.max_row, 1)
+    time.sleep(1)
+    log.info("Excel file cleaned")
+
+    log.info("Copying data...")
+    # Copiar todo
+    data = []
+    for row in ws.iter_rows(values_only=True):
+       data.append(row)
+    time.sleep(15)
+    wb1.close()
+
+
+    wb2 = None
+    log.info("Opening ...")
+    try:
+      ksi_file= os.getenv("KSI_MONITORING_FILE")
+      wb2 = load_workbook(ksi_file)
+      ws = wb2.active
+      # trabajar on sheet "WIP Defect"
+      ws_target = wb2["WIP Defect"]    
+
+      # Pegar desde C3
+      start_row = 3
+      srtart_col = 3
+      for r_idx, row in enumerate(data, start=start_row):
+        for c_idx, value in enumerate(row, start=srtart_col):
+            ws_target.cell(row=r_idx, column=c_idx, value=value)
+      log.info("Data copied to target workbook")
+      wb2.save(ksi_file)
+      log.info(f"Workbook saved: {ksi_file}")
+
+    except Exception as e:
+      print(f"Error: {e}")
+
+    finally:
+     if wb2:
+        wb2.close()
+
+    #---------------------------------------------------------------------------------------------------------------------
+
+    time.sleep(5)
+    log.info("Looking for latest R/M Defects Excel file...")
+    latest_excel = get_latest_file(download_path, "R_M Defect*.xlsx")
+    if latest_excel:
+        log.info(f"Opening latest file: {latest_excel.name}")
+        wb2 = load_workbook(latest_excel)
+        ws1 = wb2.active
+        
+        # ── Desproteger workbook si está protegido ──────────────────────
+        if wb2.read_only:
+            log.info("Workbook structure is locked. Unlocking...")
+            wb2.security.read_only = False
+            log.info("Workbook unlocked successfully")
+        
+    else:
+        log.error("No file found")
+        sys.exit(1)
+
+    log.info("Cleaning up Excel file...")
+    ws1.delete_rows(1, 3)   # Borra fila 1 y 3 de una vez
+    time.sleep(1)          # Espera un segundo para asegurarse de que se procese la eliminación
+    ws1.delete_rows(ws1.max_row, 1)
+    time.sleep(1)
+    log.info("Excel file cleaned")
+
+    log.info("Copying data...")
+    # Copiar todo
+    data1 = []
+    for row in ws1.iter_rows(values_only=True):
+       data1.append(row)
+    time.sleep(15)
+    wb2.close()
+
+
+    wb3 = None
+    log.info("Opening ...")
+    try:
+      ksi_file= os.getenv("KSI_MONITORING_FILE")
+      wb3 = load_workbook(ksi_file)
+      ws = wb3.active
+      # trabajar on sheet "RM Defect"
+      ws_target = wb3["RM Defect"]    
+
+      # Pegar desde C3
+      start_row = 3
+      srtart_col = 3
+      for r_idx, row in enumerate(data1, start=start_row):
+        for c_idx, value in enumerate(row, start=srtart_col):
+            ws_target.cell(row=r_idx, column=c_idx, value=value)
+      log.info("Data copied to target workbook")
+      wb3.save(ksi_file)
+      log.info(f"Workbook saved: {ksi_file}")
+
+    except Exception as e:
+      print(f"Error: {e}")
+
+    finally:
+     if wb3:
+        wb3.close()
+
+    log.info("✅ Automation finished succesfully")
+
+if __name__ == "__main__":
+    main()
