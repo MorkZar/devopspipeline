@@ -95,3 +95,238 @@ def main():
 
 if __name__ == "__main__":
     main()
+--------------------------------------------------------------------------
+Completo:
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.common.keys import Keys
+
+from dotenv import load_dotenv
+import os
+import time
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+import pandas as pd
+from openpyxl import load_workbook
+
+# =========================
+# RETRY ENGINE 🔁
+# =========================
+def retry_operation(func, retries=3, delay=3, backoff=2, log=None, step_name=""):
+    for attempt in range(1, retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            if log:
+                log.warning(f"[{step_name}] Attempt {attempt} failed: {e}")
+
+            if attempt == retries:
+                if log:
+                    log.error(f"[{step_name}] All retries failed")
+                raise e
+
+            time.sleep(delay)
+            delay *= backoff
+
+
+# =========================
+# LOGGER
+# =========================
+def setup_logger():
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    log_file = log_dir / f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    logger = logging.getLogger("RPA")
+    logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+
+    fh = logging.FileHandler(log_file)
+    fh.setFormatter(fmt)
+
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    return logger
+
+
+# =========================
+# UTILS
+# =========================
+def get_download_path(base):
+    today = datetime.now().strftime("%Y-%m-%d")
+    path = Path(base) / today
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_latest_file(directory, pattern):
+    files = list(Path(directory).glob(pattern))
+    return max(files, key=lambda f: f.stat().st_mtime) if files else None
+
+
+def wait_for_download(directory, timeout=60):
+    start = time.time()
+
+    while True:
+        files = list(Path(directory).glob("*"))
+        if files and not any(f.suffix == ".crdownload" for f in files):
+            return max(files, key=lambda f: f.stat().st_mtime)
+
+        if time.time() - start > timeout:
+            raise Exception("Download timeout")
+
+        time.sleep(1)
+
+
+# =========================
+# MAIN BOT
+# =========================
+def run_bot():
+
+    log = setup_logger()
+    load_dotenv()
+
+    URL = os.getenv("URL_GMES")
+    USER = os.getenv("GMES_USER")
+    PASSWORD = os.getenv("GMES_PASS")
+    BASE_DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR")
+    KSI_FILE = os.getenv("KSI_MONITORING_FILE")
+
+    download_path = get_download_path(BASE_DOWNLOAD_DIR)
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_experimental_option("prefs", {
+        "download.default_directory": str(download_path),
+        "download.prompt_for_download": False,
+    })
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=chrome_options
+    )
+
+    wait = WebDriverWait(driver, 10)
+
+    try:
+        # ================= LOGIN =================
+        def do_login():
+            driver.get(URL)
+            wait.until(EC.presence_of_element_located((By.ID, "txtUSER_ID"))).send_keys(USER)
+            driver.find_element(By.ID, "txtPWD").send_keys(PASSWORD)
+            driver.find_element(By.ID, "btnLogin").click()
+            wait.until(EC.presence_of_element_located((By.ID, "btn_nav04")))
+            log.info("Login OK")
+
+        retry_operation(do_login, log=log, step_name="LOGIN")
+
+        # ================= NAVIGATION =================
+        def navigate():
+            wait.until(EC.element_to_be_clickable((By.ID, "btn_nav04"))).click()
+            wait.until(EC.element_to_be_clickable((By.ID, "ui-id-9"))).click()
+            wait.until(EC.element_to_be_clickable((By.ID, "ui-id-38"))).click()
+            wait.until(EC.element_to_be_clickable((By.ID, "ui-id-60"))).click()
+            log.info("Navigation OK")
+
+        retry_operation(navigate, log=log, step_name="NAVIGATION")
+
+        # ================= SEARCH =================
+        def search():
+            driver.switch_to.frame("mainTabControl_contents_56_body")
+            date_input = wait.until(EC.presence_of_element_located((By.ID, "txtSearchPeriodEndDate_input")))
+            date_input.clear()
+            date_input.send_keys((datetime.now() - pd.Timedelta(days=1)).strftime("%Y%m%d"))
+            date_input.send_keys(Keys.RETURN)
+
+            wait.until(EC.element_to_be_clickable((By.ID, "btnMainSearch"))).click()
+
+            WebDriverWait(driver, 20).until(
+                EC.invisibility_of_element_located((By.ID, "lbMsg"))
+            )
+            log.info("Search OK")
+
+        retry_operation(search, log=log, step_name="SEARCH")
+
+        # ================= DOWNLOAD =================
+        def download_fg():
+            btn = wait.until(EC.element_to_be_clickable((By.ID, "btnGrid1DownloadExcel1")))
+            btn.click()
+            driver.switch_to.active_element.send_keys(Keys.ENTER)
+
+        retry_operation(download_fg, log=log, step_name="DOWNLOAD FG")
+
+        file_fg = retry_operation(
+            lambda: wait_for_download(download_path),
+            log=log,
+            step_name="WAIT DOWNLOAD FG"
+        )
+
+        # ================= PROCESS EXCEL =================
+        def process_fg():
+            wb = load_workbook(file_fg)
+            ws = wb.active
+
+            ws.delete_rows(1, 3)
+            ws.delete_rows(ws.max_row, 1)
+
+            data = [row for row in ws.iter_rows(values_only=True)]
+            wb.close()
+            return data
+
+        data_fg = retry_operation(process_fg, log=log, step_name="PROCESS FG")
+
+        # ================= WRITE TO MASTER =================
+        def write_master():
+            wb = load_workbook(KSI_FILE)
+            ws = wb["WIP Defect"]
+
+            for r, row in enumerate(data_fg, start=3):
+                for c, val in enumerate(row, start=3):
+                    ws.cell(row=r, column=c, value=val)
+
+            wb.save(KSI_FILE)
+            wb.close()
+
+        retry_operation(write_master, log=log, step_name="WRITE MASTER")
+
+        log.info("✅ BOT COMPLETED SUCCESSFULLY")
+
+    finally:
+        driver.quit()
+
+
+# =========================
+# GLOBAL RETRY (🔥 PRO LEVEL)
+# =========================
+if __name__ == "__main__":
+    MAX_RUNS = 3
+
+    for attempt in range(1, MAX_RUNS + 1):
+        try:
+            print(f"\n🚀 RUN {attempt}")
+            run_bot()
+            break
+
+        except Exception as e:
+            print(f"❌ FAILED RUN {attempt}: {e}")
+
+            if attempt == MAX_RUNS:
+                print("💀 BOT FAILED COMPLETELY")
+                raise
+
+            time.sleep(10)
