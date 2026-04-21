@@ -28,3 +28,33 @@ nuevo_path = os.path.join(carpeta, "archivo_nuevo.xlsx")
 df.to_excel(nuevo_path, index=False, header=False)
 
 print("Guardado en:", nuevo_path)
+
+-----------------------------------------------------------------
+def safe_pivot_update(file_path, sheet_name, pivot_name, source_range):
+    import win32com.client as win32
+
+    excel = win32.Dispatch("Excel.Application")
+    excel.Visible = False
+
+    try:
+        wb = excel.Workbooks.Open(file_path)
+        ws = wb.Worksheets(sheet_name)
+
+        pt = ws.PivotTables(pivot_name)
+
+        cache = wb.PivotCaches().Create(
+            SourceType=1,
+            SourceData=source_range
+        )
+
+        pt.ChangePivotCache(cache)
+        pt.RefreshTable()
+
+        wb.Save()
+
+    except Exception as e:
+        print("Error en automatización:", e)
+
+    finally:
+        wb.Close()
+        excel.Quit()
