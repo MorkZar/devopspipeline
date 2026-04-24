@@ -1,37 +1,45 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from dotenv import load_dotenv
-from selenium.webdriver.common.keys import Keys
-import os
-import time
+mport configparser
+import datetime
 import logging
-import sys
-from datetime import datetime
 from pathlib import Path
-import pandas as pd
+import subprocess
+import sys
 from openpyxl import load_workbook
-import pyautogui
 import win32com.client
-import win32con
-import win32gui
+import time
+from datetime import datetime, timedelta
+import os
+import pyautogui
+import pyperclip
+from dotenv import load_dotenv
 
-# =========================
-# LOGS Config
-# =========================
+load_dotenv()
+
+BASE_LOG_DIR = os.getenv("DOWNLOAD_LOG_DIR")
+path = os.getenv("KSI_MONITORING_FILE")
+path_sap = os.getenv("SAP_Excel")
+
+def get_base_path():
+    if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+config = configparser.ConfigParser()
+config.read(os.path.join(get_base_path(), 'config.ini'), encoding='utf-8-sig')
+sap_cfg = config['SAP_LOGIN']
+
+user = sap_cfg['user']
+password = sap_cfg['password']
+server = sap_cfg['server']
+
 def setup_logger():
     log_dir = get_logs_paths()
     log_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"WIPandRMDefect_{timestamp}.log"
+    log_file = log_dir / f"ZRPPM2010_{timestamp}.log"
 
-    logger = logging.getLogger("GMES")
+    logger = logging.getLogger("SAP_ZRPPM2010")
     logger.setLevel(logging.DEBUG)
 
     # Formato
@@ -39,7 +47,6 @@ def setup_logger():
         "[%(asctime)s] [%(levelname)-8s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    
      # Handler → archivo
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
@@ -56,25 +63,6 @@ def setup_logger():
     logger.info(f"Log started: {log_file}")
     return logger
 
-
-# =========================
-# CONFIGURACIÓN
-# =========================
-load_dotenv()
-URL      = os.getenv("URL_GMES")
-USUARIO  = os.getenv("GMES_USER")
-PASSWORD = os.getenv("GMES_PASS")
-
-BASE_DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR")
-BASE_LOG_DIR = os.getenv("DOWNLOAD_LOG_DIR")
-
-
-def get_download_path():
-    """Devuelve BASE_DIR/YYYY-MM-DD y crea la carpeta si no existe."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    path = Path(BASE_DOWNLOAD_DIR) / today
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 def get_logs_paths():
     today = datetime.now().strftime("%y-%m-%d-logs")
@@ -97,275 +85,262 @@ def get_latest_file(directory, pattern="*"):
     files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return files[0] if files else None
 
-def calculate_yesterday_date():
-    yesterday = datetime.now() - pd.Timedelta(days=1)
-    return yesterday.strftime("%Y%m%d")
+def wait_element(session, element, timeout=15):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            return session.findById(element)
+        except:
+            time.sleep(1)
+    raise Exception(f"Element not found: {element}")
 
-def login(driver):
-    # ── 1. Navigate to URL ──────────────────────────────────────────────────────
-    log.info(f"Navigating to: {URL}")
-    driver.get(URL)
-
-    # ── Handle Arlet ────────────────────────────────────────────────────
-    try:
-        WebDriverWait(driver, 5).until(EC.alert_is_present())
-        alert = driver.switch_to.alert
-        log.info(f"Alert detected: {alert.text}")
-        alert.accept()
-        log.info("Alert was accepted (OK)")
-    except TimeoutException:
-        log.debug("No alert")
-
-    # ── 2. Login ──────────────────────────────────────────────────────────
-    log.info("login...")
-    wait = WebDriverWait(driver, 20)
-    wait.until(EC.presence_of_element_located((By.ID, "txtUSER_ID"))).send_keys(USUARIO)
-    driver.find_element(By.ID, "txtPWD").send_keys(PASSWORD)
-    driver.find_element(By.ID, "cboLocale_button").click()
-    wait.until(EC.element_to_be_clickable((By.ID, "cboLocale_itemTable_1"))).click()
-    driver.find_element(By.ID, "btnLogin").click()
-    log.info("Credential sent")
-
-    # ── 3. Esperar redirección ────────────────────────────────────────────
-    log.info("Waiting for post-login redirection...")
-    wait.until(EC.presence_of_element_located((By.ID, "btn_nav04")))
-    log.info("Login successful - main page loaded")
-
-def navigate_menu(driver):
-    # ── 4. Navigate through menú ────────────────────────────────────────────────
-    log.info("Navigating through menu......")
-
-    wait = WebDriverWait(driver, 20)
-    btn_nav = wait.until(EC.presence_of_element_located((By.ID, "btn_nav02")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", btn_nav)
-    wait.until(EC.element_to_be_clickable((By.ID, "btn_nav02")))
-    btn_nav.click()
-    log.debug("btn_nav02 clicked")
-
-    elem2 = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-11")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", elem2)
-    elem2.click()
-    log.debug("ui-id-11 clicked")
-
-    elem3 = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-19")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", elem3)
-    elem3.click()
-    log.debug("ui-id-19 clicked")
-    log.info("Menu navigated succesfully")
-
-    # ── 5. Opciones de consulta ───────────────────────────────────────────
-    log.info("Switch iframe...")
-    driver.switch_to.frame("mainTabControl_contents_1406_body")
-    wait_frame = WebDriverWait(driver, 10)
-
-    location = wait_frame.until(EC.element_to_be_clickable((By.ID, "tabControl1_tab_tabs3")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", location)
-    location.click()
-    log.info("Location Item Qty selected")
-
-    log.info("Selecting Refrence Time option...")
-    rt = wait_frame.until(EC.element_to_be_clickable((By.ID, "rdoArragement_input_1")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", rt)
-    rt.click()
-    log.info("Reference Time selected")
-
-    log.info("Selecting Current Date and hour 6:51...")
-    hour = wait_frame.until(EC.element_to_be_clickable((By.ID, "cboDateRevList_button")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", hour)
-    hour.click()
-    hour_option = wait_frame.until(EC.element_to_be_clickable((By.ID, "cboDateRevList_itemTable_1")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", hour_option)
-    hour_option.click()
-    log.debug("Hour 6:51 selected")
-
-    ckPrice = wait_frame.until(EC.element_to_be_clickable((By.ID, "chkPrice_input_0")))
-    driver.execute_script("arguments[0].scrollIntoView(true);", ckPrice)
-    ckPrice.click()
-    log.info("Price option selected")
-
-
-def searchAndDownload(driver):
-    # ── 6. Ejecutar búsqueda ──────────────────────────────────────────────
-    wait_frame = WebDriverWait(driver, 20)
-    log.info("Excecuting main search...")
-    wait_frame.until(EC.element_to_be_clickable((By.ID, "btnMainSearch"))).click()
-    log.info("Búsqueda iniciada")
-
-    # ── 7. Esperar resultados ─────────────────────────────────────────────
-    log.info("Waiting for loading bar...")
-    WebDriverWait(driver, 20).until(
-        EC.invisibility_of_element_located((By.ID, "loadingBar"))
-    )
-    log.info("Results loaded")
-
-    # ── 8. Descargar Excel ────────────────────────────────────────────────
-    log.info("Starting Excel Download...")
-    download_btn = WebDriverWait(driver, 10).until(
-    EC.element_to_be_clickable((By.ID, "btnGrid3ExcelDownload"))
-    )
-    download_btn.click()
-    log.debug("Excel download button clicked")
-
-    time.sleep(5)
-    driver.switch_to.active_element.send_keys(Keys.ENTER)
-    log.info("Download confirmation sent (ENTER)")
-    time.sleep(10)
-
-def process_excel(download_path):
-    log.info("Looking for latest Excel file...")
-    latest_excel = get_latest_file(download_path, "Location Item Qty_*.xlsx")
-    if latest_excel:
-        log.info(f"Opening latest file: {latest_excel.name}")
-        wb1 = load_workbook(latest_excel)
-        ws = wb1.active
-        
-        # ── Desproteger workbook si está protegido ──────────────────────
-        if wb1.read_only:
-           log.info("Workbook structure is locked. Unlocking...")
-           wb1.security.read_only = False
-           log.info("Workbook unlocked successfully")
-        
-    else:
-      log.error("No file found")
-      sys.exit(1)
-
-    #print('Total number of rows: '+str(ws.max_row)+'. And total number of columns: '+str(ws.max_column))
-
-    log.info("Cleaning up Excel file...")
-    ws.delete_rows(1, 2)   # Delete Row 1 and 2
-    time.sleep(1)          
-    ws.delete_rows(ws.max_row, 1) #Delete Total Row
-    time.sleep(1)
-    log.info("Excel file cleaned")
-
-    log.info("Copying data...")
-    # Copiar todo
-    data = []
-    for row in ws.iter_rows(values_only=True):
-       data.append(row)
-    time.sleep(2)
-    wb1.close()
-
-
-    wb2 = None
-    log.info("Opening Main Excel file...")
-    try:
-      mcm_qc= os.getenv("MCM_QC_INV_MONITORING_FILE")
-      wb2 = load_workbook(mcm_qc)
-      ws = wb2.active
-      # trabajar
-      ws_target = wb2["Inv.All_Loc"]          # hoja destino
-
-      # Pegar desde A2ttd
-      start_row = 3
-      start_col = 2
-      for r_idx, row in enumerate(data, start=start_row):
-        for c_idx, value in enumerate(row, start=start_col):
-            ws_target.cell(row=r_idx, column=c_idx, value=value)
-      log.info("Data copied to target workbook")
-      wb2.save(mcm_qc)
-
-    except Exception as e:
-      print(f"Error: {e}")
-
-    finally:
-     if wb2:
-        wb2.close()
-
-def processPV3():
-    file = os.getenv("MCM_QC_INV_MONITORING_FILE")
-    if not file:
-        log.error("Variable MCM_QC_INV_MONITORING_FILE not found in .env")
-        return
-
-    excel = win32com.client.Dispatch("Excel.Application")
-    excel.Visible = True
-    excel.WindowState = -4137  # xlMaximized
-    wb = excel.Workbooks.Open(file)
-    ws = wb.Sheets("PV3 (QC)")
-    time.sleep(5)
-
-    ws.Activate()
-    ws.Cells(5, 11).Select()
-    # Abre la pestaña contextual "PivotTable Analyze" en la cinta.
-    
-    log.info("Workbook saved after PV3 processing")
+def calculate_date():
+    today = datetime.now()
+    first_day_of_month = today.replace(day=1)
+    yesterday = today - timedelta(days=1)
+    return first_day_of_month.strftime("%Y.%m.%d"), yesterday.strftime("%Y.%m.%d")
 
 log = setup_logger()
 
-def main():
-    driver = None
 
-    try:
-        # ── Validar credenciales ──────────────────────────────────────────────
-        if not USUARIO or not PASSWORD:
-            log.error("Variables GMES_USER / GMES_PASS not found in file .env")
-            sys.exit(1)
-        log.info(f"User loaded: {USUARIO}")
-
-        if not URL:
-            log.error("Variable URL_GMES not found in file .env")
-            sys.exit(1)
-
-        # ── Preparar carpeta de descarga ──────────────────────────────────────
-        download_path = get_download_path()
-        log.info(f"Download folder: {download_path}")
-
-        # ── Chrome Options────────────────────────────────────────────────
-        log.info("Configuring Chrome...")
-        chrome_options = Options()
-        chrome_options.add_argument("--start-maximized")
-        chrome_options.add_argument("--disable-notifications")
-        #chrome_options.add_argument("--disable-hang-monitor")
-        #chrome_options.add_argument("--disable-dev-shm-usage")
-        #chrome_options.add_argument("--no-sandbox")
-        #chrome_options.add_argument("--headless=new")
-        #chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_experimental_option("prefs", {
-            "download.default_directory": str(download_path),
-            "download.prompt_for_download": False,
-            "directory_upgrade": True,
-        })
-
-        # ── Inicializar driver ────────────────────────────────────────────────
-        log.info("Starting ChromeDriver...")
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=chrome_options
-        )
-        driver.set_page_load_timeout(600)
-        driver.set_script_timeout(600)
-
-        wait = WebDriverWait(driver, 20)
-        log.info("ChromeDriver started succesfully")
-
-        #Login
-        login(driver)
-        #Navegación por menú
-        navigate_menu(driver)
-        #Búsqueda y descarga de Excel
-        searchAndDownload(driver)
-        time.sleep(3)
+def open_sap():
     
-    except TimeoutException as e:
-        log.error(f"Timeout waiting for element: {e}")
-        sys.exit(2)
-    except WebDriverException as e:
-        log.error(f"WebDriver error: {e}")
-        sys.exit(3)
+    try:
+        log.info("[LOG] Opening SAP Logon...")
+        os.system("taskkill /f /im saplogon.exe >nul 2>&1")
+        time.sleep(2)
+        subprocess.Popen(r"C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe")
+
+        time.sleep(5)
+        # Abrir SAP Logon
+        sap_gui = win32com.client.GetObject("SAPGUI")
+        application = sap_gui.GetScriptingEngine
+
+        # Conexión (0 = primera conexión)
+        connection = application.OpenConnection(server, True)
+
+        time.sleep(3)
+
+        # Crear sesión
+        session = connection.Children(0)
+
+        # Esperar campos login
+        wait_element(session, "wnd[0]/usr/txtRSYST-BNAME")
+        log.info("[LOG] Performing Login...")
+        # Credenciales
+        session.findById("wnd[0]").maximize()        
+        session.findById("wnd[0]/usr/txtRSYST-BNAME").setFocus()
+        session.findById("wnd[0]/usr/txtRSYST-BNAME").text = user
+        session.findById("wnd[0]/usr/pwdRSYST-BCODE").text = password
+        # Enter
+        session.findById("wnd[0]").sendVKey(0)
+
+        return session
+
     except Exception as e:
-        log.exception(f"Unexpected error: {e}")
-        sys.exit(4)
+        log.error("Error opening SAP: %s", e)
+
+def open_main_excel():
+    ksi_file = os.getenv("KSI_MONITORING_FILE")
+    try:
+        wb = load_workbook(ksi_file)
+        log.info("Main Excel file opened successfully")
+        return wb, ksi_file
+    except Exception as e:
+        log.error(f"Error opening Main Excel file: {e}")
+        sys.exit(1)
+
+def paste_to_sheet(wb, sheet_name, clipboard_data, start_row, start_col):
+    parsed = [row.split('\t') for row in clipboard_data.splitlines() if row.strip()]
+    ws = wb[sheet_name]
+    for r_idx, row in enumerate(parsed, start=start_row):
+        for c_idx, value in enumerate(row, start=start_col):
+            ws.cell(row=r_idx, column=c_idx, value=value)
+    log.info(f"Data pasted to sheet '{sheet_name}' ({len(parsed)} rows)")
+
+def item_error(session,wb):
+    log.info("[LOG] Starting SAP data extraction process material check list (ZRPPM2000)...")
+    # Maximizar
+    session.findById("wnd[0]").maximize()
+    # Transacción
+    session.findById("wnd[0]/tbar[0]/okcd").text = "ZRPPM2000"
+    session.findById("wnd[0]").sendVKey(0)
+    # Presionar botón (btn[17])
+    session.findById("wnd[0]/tbar[1]/btn[17]").press()
+    # Seleccionar columna "TEXT" y fila 0 en el ALV
+    alv = session.findById("wnd[1]/usr/cntlALV_CONTAINER_1/shellcont/shell")
+    alv.currentCellColumn = "TEXT"
+    alv.selectedRows = "0"
+    log.info("Waiting for data to load in SAP...")
+    # Confirmar selección (botón btn[2])
+    session.findById("wnd[1]/tbar[0]/btn[2]").press()
+    # Ejecutar (btn[8])
+    session.findById("wnd[0]/tbar[1]/btn[8]").press()
+    ##################################################
+    wait_element(session, "wnd[0]/usr/cntlCC_0100/shellcont/shell")
+    # Seleccionar todas las filas
+    shell = session.findById("wnd[0]/usr/cntlCC_0100/shellcont/shell")
+    shell.setCurrentCell(-1, "")
+    shell.selectAll()
+    shell.setFocus()
+    # Asegurar que SAP tiene el foco del sistema operativo
+    session.findById("wnd[0]").setFocus()
+    shell.setFocus()
+    time.sleep(1)
+    pyautogui.hotkey('ctrl', 'c')
+    time.sleep(0.5)  # Esperar a que el portapapeles se actualice
+    data = pyperclip.paste()
+    log.info("Data copied from SAP clipboard")
+    paste_to_sheet(wb, "Item Error", data, 2 , 2)
+    session.findById("wnd[0]/tbar[0]/btn[15]").press()
+    session.findById("wnd[0]/tbar[0]/btn[15]").press()
+    
+
+
+def bom_error(session, wb):
+    log.info("[LOG] Starting SAP data extraction process from ZRPPM2010...")
+    # Maximizar
+    session.findById("wnd[0]").maximize()
+    # Transacción
+    session.findById("wnd[0]/tbar[0]/okcd").text = "ZRPPM2010"
+    session.findById("wnd[0]").sendVKey(0)
+    wait_element(session, "wnd[0]/tbar[1]/btn[17]")
+    # Presionar botón en la barra de herramientas
+    session.findById("wnd[0]/tbar[1]/btn[17]").press()
+    # Seleccionar celda en el ALV
+    alv = session.findById("wnd[1]/usr/cntlALV_CONTAINER_1/shellcont/shell")
+    alv.setCurrentCell(1, "TEXT")
+    alv.selectedRows = "1"
+    # Confirmar selección
+    session.findById("wnd[1]/tbar[0]/btn[2]").press()
+    # Desmarcar checkbox
+    chk = session.findById("wnd[0]/usr/chkCB_RECRE")
+    chk.selected = False
+    chk.setFocus()
+    # Ejecutar
+    session.findById("wnd[0]/tbar[1]/btn[8]").press()
+    log.info("Waiting for data to load in SAP...")
+    # Seleccionar celda en otra tabla
+    wait_element(session, "wnd[0]/usr/cntlCC_0100/shellcont/shell")
+    shell = session.findById("wnd[0]/usr/cntlCC_0100/shellcont/shell")
+    shell.setCurrentCell(1, "SPART")
+    shell.selectAll()
+    shell.setFocus()
+    session.findById("wnd[0]").setFocus()
+    shell.setFocus()
+    time.sleep(1)
+    pyautogui.hotkey('ctrl', 'c')
+    time.sleep(0.5)
+    data1 = pyperclip.paste()
+    log.info("Data copied from SAP clipboard")
+    paste_to_sheet(wb, "BOM Error", data1, 2, 1)
+    session.findById("wnd[0]/tbar[0]/btn[15]").press()
+    session.findById("wnd[0]/tbar[0]/btn[15]").press()
+
+
+def process_ZRPPS1000(session, wb, first_day_of_month, last_day_of_month):
+    log.info("[LOG] Starting SAP data extraction process from ZRPPS1000...")
+    # Maximizar
+    session.findById("wnd[0]").maximize()
+    # Transacción
+    session.findById("wnd[0]/tbar[0]/okcd").text = "ZRPPS1000"
+    session.findById("wnd[0]").sendVKey(0)
+    session.findById("wnd[0]/usr/ctxtS_WERKS-LOW").text = "3301"
+    session.findById("wnd[0]/usr/ctxtS_DATUM-LOW").text = first_day_of_month
+    session.findById("wnd[0]/usr/ctxtS_DATUM-HIGH").text = last_day_of_month
+    session.findById("wnd[0]/usr/ctxtS_DATUM-HIGH").setFocus()
+    session.findById("wnd[0]/usr/ctxtS_DATUM-HIGH").caretPosition = 10
+    log.info("Waiting for data to load in SAP...")
+    session.findById("wnd[0]/tbar[1]/btn[8]").press()
+    
+    summary_shell = session.findById("wnd[0]/shellcont/shell")
+
+    def _get_detail_shell(timeout=10):
+        candidates = [
+            "wnd[0]/shellcont/shell[0]",
+            "wnd[0]/usr/cntlCC_0100/shellcont/shell",
+            "wnd[0]/usr/shellcont/shell",
+        ]
+        start = time.time()
+        while time.time() - start < timeout:
+            for element_id in candidates:
+                try:
+                    return session.findById(element_id)
+                except:
+                    continue
+            time.sleep(0.3)
+        raise Exception("Detail grid not found after drill-down")
+    
+
+    summary_shell.setCurrentCell(3, "ZPRERROR_CNT")
+    cell_value = summary_shell.getCellValue(3, "ZPRERROR_CNT")
+    cell_value_str = str(cell_value).strip() if cell_value is not None else ""
+
+    if cell_value_str and cell_value_str != "0":
+        log.info(f"Celda 3 contiene: {cell_value_str}, procediendo...")
+        summary_shell.clickCurrentCell()
+        session.findById("wnd[0]/shellcont/shell").setCurrentCell(-1,"")
+        session.findById("wnd[0]/shellcont/shell").selectAll()
+        session.findById("wnd[0]/shellcont/shell").setFocus()
+        pyautogui.hotkey('ctrl', 'c')
+        data2 = pyperclip.paste()
+        log.info("Data copied from SAP clipboard")
+        paste_to_sheet(wb, "12.04", data2, 2, 3)
+        session.findById("wnd[0]/tbar[0]/btn[15]").press()
+    else:
+        log.info("Celda 3 vacia o en 0, omitiendo proceso.")
+    ############################################
+    summary_shell.setCurrentCell(4, "ZPRERROR_CNT")
+    cell_value = summary_shell.getCellValue(4, "ZPRERROR_CNT")
+    cell_value_str = str(cell_value).strip() if cell_value is not None else ""
+
+    if cell_value_str and cell_value_str != "0":
+        log.info(f"Celda 4 contiene: {cell_value_str}, procediendo...")
+        summary_shell.clickCurrentCell()
+        time.sleep(1)
+        erroes_shell = _get_detail_shell()
+        real_rows = erroes_shell.rowCount
+        print(f"Real row count in detail grid: {real_rows}")
+        if real_rows == 1:
+           time.sleep(0.5)
+           session.findById("wnd[0]/shellcont/shell[0]").selectedRows = "0"
+           session.findById("wnd[0]/shellcont/shell").setFocus()
+           pyautogui.hotkey('ctrl', 'c')
+           data3 = pyperclip.paste()
+           log.info("Data copied from SAP clipboard")
+           paste_to_sheet(wb, "12.05", data3, 2, 4)
+        else:
+           session.findById("wnd[0]/shellcont/shell").selectAll()
+           session.findById("wnd[0]/shellcont/shell").setFocus()
+           pyautogui.hotkey('ctrl', 'c')
+           data3 = pyperclip.paste()
+           log.info("Data copied from SAP clipboard")
+           paste_to_sheet(wb, "12.05", data3, 2, 4)
+           
+        session.findById("wnd[0]/tbar[0]/btn[15]").press()
+    else:
+        log.info("Celda 4 vacia o en 0, omitiendo proceso.")
+        
+    log.info("ZRPPM1000 process completed.")
+
+
+def main():
+    session = open_sap()
+    log.info("Opening main Excel file...")
+    wb, ksi_file = open_main_excel()
+    try:
+        #item_error(session, wb)
+        #bom_error(session,  wb)
+        first_day_of_month, yesterday = calculate_date()
+        process_ZRPPS1000(session, wb, first_day_of_month, yesterday)
+        wb.save(ksi_file)
+        log.info(f"Workbook saved: {ksi_file}")
+    except Exception as e:
+        log.error(f"Error in main: {e}")
     finally:
-        if driver:
-            log.info("Closing browser...")
-            driver.quit()
-            log.info("Browser Closed")
-    log.info("✅ Continue with excel processing...")
-    process_excel(download_path)
-    processPV3()
-    time.sleep(3)
-    log.info("Automation finished successfully")
+        wb.close()
+        log.info("Workbook closed.")
+    
 
 if __name__ == "__main__":
-    main()
+    main()   
